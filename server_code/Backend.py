@@ -1,58 +1,89 @@
 import anvil.server
-from anvil.tables import app_tables
+from anvil.files import data_files
+import sqlite3
 import datetime
+
+DB_NAME = "Seeberger_Jakob_fitnessstudio.db"
+
+
+def get_db():
+  conn = sqlite3.connect(data_files[DB_NAME])
+  conn.row_factory = sqlite3.Row
+  return conn
 
 
 @anvil.server.callable
 def get_kurse():
+  conn = get_db()
+  cur = conn.cursor()
+
+  cur.execute("""
+    SELECT
+      k.kurs_id,
+      k.bezeichnung,
+      k.wochentag,
+      k.uhrzeit,
+      t.vorname || ' ' || t.nachname AS trainer,
+      COUNT(a.anmeldung_id) AS teilnehmer
+    FROM kurse k
+    JOIN trainer t ON k.trainer_id = t.trainer_id
+    LEFT JOIN anmeldungen a ON k.kurs_id = a.kurs_id
+    GROUP BY k.kurs_id, k.bezeichnung, k.wochentag, k.uhrzeit, trainer
+    ORDER BY k.wochentag, k.uhrzeit
+  """)
+
   daten = []
-
-  for kurs in app_tables.kurse.search():
-    trainer = kurs['trainer']
-    trainer_name = f"{trainer['vorname']} {trainer['nachname']}"
-
-    teilnehmerzahl = len(list(app_tables.anmeldung.search(kurs=kurs)))
-
+  for row in cur.fetchall():
     daten.append({
-      'Kurse': kurs['bezeichnung'],
-      'Wochentag': kurs['wochentag'],
-      'Uhrzeit': kurs['uhrzeit'],
-      'Trainer': trainer_name,
-      'Teilnehmer': str(teilnehmerzahl),
-      'kurs_row': kurs
+      "Kurse": row["bezeichnung"],
+      "Wochentag": row["wochentag"],
+      "Uhrzeit": row["uhrzeit"],
+      "Trainer": row["trainer"],
+      "Teilnehmer": str(row["teilnehmer"]),
+      "kurs_id": row["kurs_id"]
     })
 
+  conn.close()
   return daten
 
 
 @anvil.server.callable
-def get_mitglieder():
-  return [
-    (f"{m['vorname']} {m['nachname']}", m)
-    for m in app_tables.mitglieder.search()
-  ]
+def get_freie_mitglieder(kurs_id):
+  conn = get_db()
+  cur = conn.cursor()
+
+  cur.execute("""
+    SELECT m.mitglied_id, m.vorname, m.nachname
+    FROM mitglieder m
+    WHERE m.mitglied_id NOT IN (
+      SELECT a.mitglied_id
+      FROM anmeldungen a
+      WHERE a.kurs_id = ?
+    )
+    ORDER BY m.nachname, m.vorname
+  """, (kurs_id,))
+
+  daten = []
+  for row in cur.fetchall():
+    daten.append({
+      "Mitglied": f"{row['vorname']} {row['nachname']}",
+      "mitglied_id": row["mitglied_id"]
+    })
+
+  conn.close()
+  return daten
 
 
 @anvil.server.callable
-def anmelden(mitglied, kurs):
-  if mitglied is None:
-    raise Exception("Bitte ein Mitglied auswählen.")
+def anmelden(mitglied_id, kurs_id):
+  with data_files.editing(DB_NAME) as db_path:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
 
-  if kurs is None:
-    raise Exception("Kein Kurs ausgewählt.")
+    cur.execute("""
+      INSERT INTO anmeldungen (mitglied_id, kurs_id, anmeldedatum)
+      VALUES (?, ?, ?)
+    """, (mitglied_id, kurs_id, datetime.date.today().isoformat()))
 
-  schon_da = app_tables.anmeldung.get(mitglied=mitglied, kurs=kurs)
-  if schon_da:
-    raise Exception("Dieses Mitglied ist bereits angemeldet.")
-
-  aktuelle_anzahl = len(list(app_tables.anmeldung.search(kurs=kurs)))
-  max_teilnehmer = kurs['max_teilnehmer']
-
-  if aktuelle_anzahl >= max_teilnehmer:
-    raise Exception("Dieser Kurs ist bereits voll.")
-
-  app_tables.anmeldung.add_row(
-    mitglied=mitglied,
-    kurs=kurs,
-    anmeldedatum=datetime.date.today()
-  )
+    conn.commit()
+    conn.close()
